@@ -131,5 +131,9 @@ goto :eof
 goto :eof
 
 :end
+@ECHO compiling completed
+@ECHO ***** Start copying hex files with any key  - CTRL-C to abort *****
+@pause
 CopyHexFiles.bat
+
 
