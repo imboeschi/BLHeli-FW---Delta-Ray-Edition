@@ -1,4 +1,3 @@
-;**** **** **** **** ****
 ;
 ; BLHeli program for controlling brushless motors in helicopters and multirotors
 ;
@@ -294,8 +293,6 @@
 ;#define ZTW_SPIDER_LITE_18Av2_MAIN
 ;#define ZTW_SPIDER_LITE_18Av2_TAIL
 ;#define ZTW_SPIDER_LITE_18Av2_MULTI 
-
-
 
 ;**** **** **** **** ****
 ; ESC selection statements
@@ -5634,9 +5631,7 @@ arm_end_beep:
 	;; arming signal
 	xcall wait30ms
 	xcall beep_f4
-	xcall wait30ms
 	xcall beep_f4
-	xcall wait30ms
 	xcall beep_f4
 	sei						; Enable all interrupts
 	xcall wait200ms
