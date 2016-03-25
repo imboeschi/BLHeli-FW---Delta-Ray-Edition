@@ -1,3 +1,7 @@
+REM
+REM This script is from BLHeli FW originally, somewhat modified for use in BLHeli FW - Delta Ray Edition
+REM (see https://github.com/imboeschi/BLHeli-FW---Delta-Ray-Edition)
+REM
 @ECHO off
 @ECHO ***** Batch file for BlHeli (from 4712)  v.2           *****
 @ECHO ***** All Messages will be saved to MakeHex_Result.txt *****
@@ -133,7 +137,6 @@ goto :eof
 :end
 @ECHO compiling completed
 @ECHO ***** Start copying hex files with any key  - CTRL-C to abort *****
-@pause
 CopyHexFiles.bat
 
 

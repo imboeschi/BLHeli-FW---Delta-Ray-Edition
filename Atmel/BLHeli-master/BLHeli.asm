@@ -29,16 +29,10 @@
 ;
 ; This file is best viewed with tab width set to 5
 ;
-; The input signal can be positive 1kHz, 2kHz, 4kHz, 8kHz or 12kHz PWM (e.g. taken from the "resistor tap" on mCPx)
-	;; 
-	;; 17.01.2016 - Modified by Christopher Hegarty to support positive 15kHz PWM signal for Hobbyzone Delta Ray
-	;; 		This required removal of the 12 kHz capability
-	;; 		See comments in the code below in rcp_int_second_meas_pwm_freq:
-	;;
-; And the input signal can be PPM (1-2ms) or OneShot125 (125-250us) at rates up to several hundred Hz.
-; The code autodetects the various input modes/frequencies
-; The code can also be programmed to accept inverted input signal.
-;
+;; 17.01.2016 - Modified by Christopher Hegarty to support 15kHz PWM (positive or negative) signal for Hobbyzone Delta Ray
+;; 		All other input signal types removed.
+;; 		See comments in the code below in rcp_int_second_meas_pwm_freq:
+;;
 ; The first lines of the software must be modified according to the chosen environment:
 ; Uncomment the selected ESC and main/tail/multi mode
 ; BESC EQU "ESC"_"mode" 						
@@ -1272,9 +1266,21 @@ Pgm_Pwm_Dither:			.BYTE	1		; Programmed output PWM dither
 Pgm_Gov_P_Gain_Decoded:		.BYTE	1		; Programmed governor decoded P gain
 Pgm_Gov_I_Gain_Decoded:		.BYTE	1		; Programmed governor decoded I gain
 Pgm_Startup_Pwr_Decoded:		.BYTE	1		; Programmed startup power decoded
-
+	;;
+	;; Following variables for Delta Ray
+	;; 
 Throttle_Calibrate:		.BYTE	1 ; flag for throttle calibration on startup
 Throttle_Percentage:		.BYTE	1	  ; throttle percentage used for enunciation
+Lvc_Pulse_State:		.BYTE	1	  ; flag for Lvc Pulse PWM state (on/off)
+Lvc_Pulse_Active:		.BYTE	1	  ; flag for Lvc Pulse active
+Lvc_Pulse_Timer_L:		.BYTE	1	  ; Countdown of Timer0 interrupts (every 128us) to generate Pvc pulse pwm signal
+Lvc_Pulse_Timer_H:		.BYTE	1
+.EQU 	Lvc_Pulse_Timer_Init_On  = 4000		; Count of Timer0 interrupts to generate Pvc pulse pwm signal (length of Pcv pulse pwm signal high)
+.EQU 	Lvc_Pulse_Timer_Init_Off = 1000		; Count of Timer0 interrupts to generate Pvc pulse pwm signal (length of Pcv pulse pwm signal low)	
+						; With (1719+859)*0.128ms = 0.33 second duration; i.e. 3 Hz with 33% duty cycle
+						; Use different values for On and Off to generate other duty cycles and pulse frequency
+#define				LVC_PULSE_ON 	; Define is LVC motor pulsing should be used, otherwise power limiting will be used
+	
 
 .EQU	SRAM_BYTES	= 255		; Bytes used in SRAM. Used for number of bytes to reset
 
@@ -1672,6 +1678,48 @@ t0_int:	; Happens every 128us
 	sbr	Flags2, (1<<RCP_INT_NESTED_ENABLED)	; Set flag to enabled
 	Rcp_Int_Disable XL						; Disable rcp interrupts
 	T0_Int_Disable XL						; Disable timer0 interrupts
+	
+.IF LVC_PULSE_ON
+	;;
+	;; For Delta Ray
+	;; Decrement the throttle pulse counter and toggle the throttle pulse state bit
+	;;
+	lds	I_Temp1, Lvc_Pulse_Timer_L
+	dec	I_Temp1
+	sts	Lvc_Pulse_Timer_L, I_Temp1
+	brne	lvc_pulse_continue
+	lds	I_Temp2, Lvc_Pulse_Timer_H
+	tst	I_Temp2
+	breq	lvc_pulse_toggle
+	dec	I_Temp2
+	sts	Lvc_Pulse_Timer_H, I_Temp2
+	rjmp	lvc_pulse_continue
+lvc_pulse_toggle:
+	;; Toggle the throttle pulse state bit and reinitialize the counter
+	lds	I_Temp1, Lvc_Pulse_State
+	tst	I_Temp1
+	breq	set_lvc_pulse_high
+set_lvc_pulse_low:
+	ldi	I_Temp2, low(Lvc_Pulse_Timer_Init_On)
+	ldi	I_Temp1, high(Lvc_Pulse_Timer_Init_On)
+	mov	I_Temp3, I_Temp1
+	ldi	I_Temp1, 0	
+	rjmp	lvc_pulse_store
+set_lvc_pulse_high:
+	ldi	I_Temp2, low(Lvc_Pulse_Timer_Init_Off)
+	ldi	I_Temp1, high(Lvc_Pulse_Timer_Init_Off)
+	mov	I_Temp3, I_Temp1
+	ldi	I_Temp1, 1	
+lvc_pulse_store:	
+	;; store results and continue
+	sts	Lvc_Pulse_State, I_Temp1
+	sts	Lvc_Pulse_Timer_L, I_Temp2
+	sts	Lvc_Pulse_Timer_H, I_Temp3
+lvc_pulse_continue:
+	;;
+	;; Original code resumes here
+	;;
+.ENDIF
 	sei							; Enable interrupts
 	; Check RC pulse timeout counter
 	lds	XL, Rcp_Timeout_Cntd		; RC pulse timeout count zero?
@@ -1721,6 +1769,9 @@ t0_int_pulses_absent_no_max:
 
 t0_int_ppm_timeout_set:
 	sts	New_Rcp, I_Temp1			; Store new pulse length
+.IF LVC_PULSE_ON 
+	xcall	toggle_lvc_cutoff
+.ENDIF
 	;; For Delta Ray - also need to update the throttle percentage
 	;; This is either 0 or 99% depending upon the input level determined above
 	cpi	I_Temp1, RCP_MIN
@@ -2170,7 +2221,7 @@ rcp_int:	; Used for RC pulse timing
 	Rcp_Int_Disable XL						; Disable rcp interrupts
 	T0_Int_Disable XL						; Disable timer0 interrupts
 	sei							; Enable interrupts
-	; Check which edge it is
+
 	sbrc	Flags2, RCP_EDGE_NO			; Is it a first edge trig?
 	rjmp rcp_int_second_meas_pwm_freq	; No - branch to second
 
@@ -2203,6 +2254,9 @@ rcp_int_fail_minimum:
 	rjmp	rcp_int_set_timeout			; Yes - set new timeout and exit
 
 	sts	New_Rcp, I_Temp1			; Store new pulse length
+.IF LVC_PULSE_ON 
+	xcall	toggle_lvc_cutoff
+.ENDIF
 	rjmp	rcp_int_limited			; Set new RC pulse, new timeout and exit
 
 rcp_int_second_meas_pwm_freq:
@@ -2228,7 +2282,7 @@ rcp_int_fall:
 	;; Two changes here for the Delta Ray
 	;; The throttle count is between 0 - 133 (0.5 us pulse count)
 	;; However for enunciating the throttle we need a value between 0-99
-	;; and for maximum engine performanc we want a value between 0 - 255
+	;; and for maximum engine performance we want a value between 0 - 255
 	;; Therefore two transformations:
 	;; (a) Multiply by 1.5 and divide by 2 to arrive at the 0-99 value
 	;; (b) Subtract 6 and then multiple by two and add 1 to arrive at the 0-255 value (lsb will always be 1)
@@ -2258,6 +2312,9 @@ rcp_int_check_legal_range:
 rcp_int_limited:
 	; RC pulse value accepted
 	sts	New_Rcp, I_Temp1			; Store new pulse length
+.IF LVC_PULSE_ON
+	xcall	toggle_lvc_cutoff	
+.ENDIF
 	sbr	Flags2, (1<<RCP_UPDATED)	 	; Set updated flag
 
 rcp_int_set_timeout:
@@ -3380,6 +3437,7 @@ check_voltage_exit:
 check_voltage_lim:
 .ENDIF
 .IF MODE == 2	; Multi
+
 	; Check if low voltage limiting is enabled
 	cpi	Temp3, 1					; Is low voltage limit disabled?
 	breq	check_voltage_good			; Yes - voltage declared good
@@ -3400,8 +3458,17 @@ check_voltage_lim:
 	lds	XH, Lipo_Adc_Limit_H
 	cpc	Temp2, XH
 	brcc	check_voltage_good			; If voltage above limit - branch
-
-	; Decrease pwm limit
+	;;
+	;; For Delta Ray - if LVC_PULSE_ON then set the flag.  Otherwise limit power
+	;;
+.IF	LVC_PULSE_ON
+	ldi	Temp1, 1	; lvc warning active
+	sts	Lvc_Pulse_Active, Temp1
+	rjmp	check_voltage_continue
+.ENDIF
+	
+; Decrease pwm limit
+	
 	lds  XH, Pwm_Limit
 	tst	XH
 	breq	check_voltage_lim			; If limit zero - branch
@@ -3411,6 +3478,10 @@ check_voltage_lim:
 	rjmp	check_voltage_lim
 
 check_voltage_good:
+	ldi	Temp1, 0	; lvc warning inactive
+	sts	Lvc_Pulse_Active, Temp1
+	
+check_voltage_continue:	
 	; Increase pwm limit
 	lds  	Temp2, Pwm_Limit
 	ldi	XH, 16
@@ -3440,6 +3511,7 @@ check_voltage_lim:
 
 	lds	Temp1, Current_Pwm			; Set current pwm (no limiting)
 
+
 check_voltage_low_rpm:
 	; Limit pwm for low rpms
 	lds	XH, Pwm_Limit_By_Rpm		; Check against limit
@@ -3451,7 +3523,7 @@ check_voltage_low_rpm:
 	mov  Current_Pwm_Limited, Temp1
 	sts	Current_Pwm_Lim_Dith, Temp1
 check_voltage_pwm_done:
-.ENDIF
+.ENDIF	
 	; Set adc mux for next conversion
 	lds	XH, Adc_Conversion_Cnt		; Is next conversion for temperature?
 	cpi	XH, (TEMP_CHECK_RATE-1)
@@ -5186,6 +5258,34 @@ wait7us:			; Outer loop
 	brne	input_check_1
 	ret
 
+.IF LVC_PULSE_ON
+;;;
+;;;**** **** **** **** **** **** **** **** **** **** **** **** ****
+;;; Toggle throttle for lvc cutoff
+;;;
+;;; For Delta Ray
+;;;
+;;; uses I_Temp1 and returns New_Rcp value in I_Temp1
+;;;**** **** **** **** **** **** **** **** **** **** **** **** ****
+;;; 
+toggle_lvc_cutoff:
+	lds	I_Temp1, Lvc_Pulse_Active
+	tst	I_Temp1
+	breq	toggle_lvc_cutoff_done
+	lds	I_Temp1, Lvc_Pulse_State
+	tst	I_Temp1
+	breq	toggle_lvc_cutoff_done
+	;;
+	;; Low voltage has been detected and the lvc pwm signal is set to high - so inhibit the throttle
+	;; 
+	ldi	I_Temp1, 0
+	sts	New_Rcp, I_Temp1
+toggle_lvc_cutoff_done:
+	ret
+.ENDIF
+
+
+	
 
 ;**** **** **** **** **** **** **** **** **** **** **** **** ****
 ;**** **** **** **** **** **** **** **** **** **** **** **** ****
@@ -5267,6 +5367,13 @@ clear_ram:
 	sts	Initial_Arm, XH
 	; Initializing beep
 	cli					; Disable interrupts explicitly
+	;;
+	;; For Delta Ray
+	;; Beep strength is not always uniformly set for some reason
+	;; hardwire it to 10 (faint) for now
+	;; 
+	ldi	I_Temp1, 10
+	sts	Beep_Strength, I_Temp1
 	xcall wait200ms	
 	xcall beep_f1
 	xcall wait30ms
@@ -5284,15 +5391,16 @@ clear_ram:
 	xcall wait1s
 	xcall wait1s
 
+	;; This tone signals Delta Ray brick is now initialized
 	xcall beep_f3
 	xcall wait30ms
 	xcall beep_f2
 	xcall wait30ms
 	xcall beep_f1
-	
-	xcall wait1s
-	xcall wait1s
 
+	;; Allow two seconds to set throttle position (cannot be done before Delta Ray brick is initialized)
+	xcall wait1s
+	xcall wait1s
 
 ;**** **** **** **** **** **** **** **** **** **** **** **** ****
 ;
@@ -5303,25 +5411,40 @@ init_no_signal:
 
 	; Disable interrupts explicitly
 	cli
+	;;
+	;; For Delta Ray
+	;; 
 	;; Explicitly overide and turn on low voltage limiting
+	;; Allowed values: 
+	;;1=Off		2=3.0V/c		3=3.1V/c		4=3.2V/c		5=3.3V/c	6=3.4V/c	7=3.5V/c	8=3.6V/c
 	ldi	I_Temp1, 6
 	sts	Pgm_Low_Voltage_Lim, I_Temp1
+
+.IF LVC_PULSE_ON
+	;;
+	;; Setup initial state for LVC throttle pulsing
+	ldi	I_Temp2, low(Lvc_Pulse_Timer_Init_Off)
+	ldi	I_Temp1, high(Lvc_Pulse_Timer_Init_Off)
+	mov 	I_Temp3, I_Temp1
+	sts	Lvc_Pulse_Timer_L, I_Temp2
+	sts	Lvc_Pulse_Timer_H, I_Temp3	
+	ldi	I_Temp1, 0	; lvc throttle pulse pwm low
+	sts	Lvc_Pulse_State, I_Temp1
+	ldi	I_Temp1, 1	; lvc warning inactive
+	sts	Lvc_Pulse_Active, I_Temp1
+.ENDIF
+	;;
+	;; Delta Ray specific
 	;; Three possible throttle settings on start up:
 	;; 1. Zero throttle - normal operation
 	;; 2. 100% throttle - boot loader
 	;; 3. mid-range throttle (1-99%) - throttle calibration
-	
+	;; 
 	;;  these next two lines are probably not necessary - review later
 	ldi	Temp1, 0
 	sts	Throttle_Calibrate, Temp1
 	
 	xcall	measure_throttle
-	;; Now compare the reading counts
-	;; initial sanity check - there should be a total of 255 readings
-	mov	Temp2, Temp4
-	add	Temp2, Temp3
-	cpi	Temp2, 255
-	brne	throttle_alarm
 
 	;; if very few high readings - normal start
 	cpi	Temp4, 5
@@ -5333,11 +5456,6 @@ init_no_signal:
 	ldi	Temp3, 255
 	sts	Throttle_Calibrate, Temp3
 	rjmp	bootloader_done
-throttle_alarm:
- 	xcall beep_f4
- 	xcall wait30ms
-	xcall beep_f3
-	rjmp  throttle_alarm
 				; Jump to bootloader if present
 run_bootloader:	
 	ldi	ZL, 0x00
@@ -5394,8 +5512,8 @@ decode:
 	; Find throttle gain from stored min and max settings
 	;; 	xcall find_throttle_gain 
 	; Set beep strength
-	lds	Temp1, Pgm_Beep_Strength
-	sts	Beep_Strength, Temp1
+	;; 	lds	Temp1, Pgm_Beep_Strength
+	;; 	sts	Beep_Strength, Temp1
 	; Switch power off
 	xcall switch_power_off
 	; Timer0: clk/8 for regular interrupts
@@ -5418,13 +5536,16 @@ decode:
 	xcall Measure_Lipo_Cells			; Measure number of lipo cells
 	; Initialize RC pulse
 	cbr	Flags2, (1<<RCP_EDGE_NO)		; Set first edge flag
+	;;
+	;; Delta Ray
+	;; 
 	;; Set up the conditions as if a 15 kHz signal has been detected
 	;;
-	; Clear measure pwm frequency flag
+	;; Clear measure pwm frequency flag
 	cbr	Flags0, (1<<RCP_MEAS_PWM_FREQ)		
 	ldi	XL, (1<<RCP_PWM_FREQ_15KHZ)
 	mov	I_Temp4, XL
-	ldi	XL, 10					; Set period tolerance requirement (LSB)
+	ldi	XL, 10					; Set period tolerance requirement (LSB) - calculated from PWM values used in standard BLHeli FW
 	mov	I_Temp3, XL
 	Rcp_Int_First XH				; Enable interrupt and set to first edge
 	Rcp_Int_Enable XH	 			; Enable interrupt
@@ -5465,168 +5586,6 @@ skip_rcp_start:
 
 beep_arm:
 	;; For the delta ray we don't need the arming exercise since the Delta Ray PCB takes care of that for us
-	rjmp	arm_end_beep
-
-	; Arming sequence start
-	sts	Gov_Arm_Target, Zero	; Clear governor arm target
-arming_start:
-	rjmp arming_initial_arm_check
-	xcall wait3ms
-
-arming_initial_arm_check:
-	lds	XH, Initial_Arm		; Yes - check if it is initial arm sequence
-	cpi	XH, 1				; Is it the initial arm sequence?
-	brcc	arming_ppm_check		; Yes - proceed
-
-	rjmp program_by_tx_checked	; No - branch
-
-arming_ppm_check:
-	sbrc	Flags2, RCP_PPM		
-	rjmp	throttle_high_cal_start	; If flag is set (PPM) - branch
-
-	; PWM tx program entry
-	lds	XH, New_Rcp			; Load new RC pulse value
-	cpi	XH, RCP_MAX			; Is RC pulse max?
-	brcc	program_by_tx_entry_pwm	; Yes - proceed
-
-	rjmp	program_by_tx_checked	; No - branch
-
-program_by_tx_entry_pwm:	
-	cli						; Disable all interrupts
-	xcall beep_f4
-	sei						; Enable all interrupts
-	xcall wait100ms
-	lds	XH, New_Rcp			; Load new RC pulse value
-	cpi	XH, RCP_STOP			; Below stop?
-	brcc	program_by_tx_entry_pwm	; No - start over
-
-program_by_tx_entry_wait_pwm:	
-	cli						; Disable all interrupts
-	xcall beep_f1
-	xcall wait10ms
-	xcall beep_f1
-	sei						; Enable all interrupts
-	xcall wait100ms
-	lds	XH, New_Rcp			; Load new RC pulse value
-	cpi	XH, RCP_MAX			; At or above max?
-	brcs	program_by_tx_entry_wait_pwm	; No - start over
-
-	rjmp	program_by_tx			; Yes - enter programming mode
-
-	; PPM throttle calibration and tx program entry
-throttle_high_cal_start:
-.IF MODE <= 1	; Main or tail
-	ldi	XH, 8				; Set 3 seconds wait time
-.ELSE
-	ldi	XH, 3				; Set 1 second wait time
-.ENDIF
-	mov	Temp8, XH		
-throttle_high_cal:			
-	sbr	Flags3, (1<<FULL_THROTTLE_RANGE)	; Set range to 1000-2020us
-	cli		
-	xcall find_throttle_gain		; Set throttle gain
-	sei		
-	xcall wait100ms			; Wait for new throttle value
-	cli						; Disable interrupts (freeze New_Rcp value)
-	cbr	Flags3, (1<<FULL_THROTTLE_RANGE)	; Set programmed range
-	xcall find_throttle_gain		; Set throttle gain
-	lds	Temp7, New_Rcp			; Store new RC pulse value
-	lds	XH, New_Rcp			; Load new RC pulse value
-	cpi	XH, (RCP_MAX/2)		; Is RC pulse above midstick?
-	sei						; Enable interrupts
-	brcc	PC+2
-	rjmp	arm_target_updated		; No - branch
-
-	xcall wait1ms		
-	cli						; Disable all interrupts
-	xcall beep_f4
-	sei						; Enable all interrupts
-	dec	Temp8				
-	brne	throttle_high_cal		; Continue to wait
-
-	xcall average_throttle
-	mov	XH, Temp7				; Limit to max 250
-	subi	XH, 5				; Subtract about 2% and ensure that it is 250 or lower
-	sts	Pgm_Ppm_Max_Throttle, XH	; Store
-	xcall wait200ms				
-	cli					
-	xcall store_all_in_eeprom	
-	xcall success_beep
-	sei					
-
-throttle_low_cal_start:
-	ldi	XH, 10				; Set 3 seconds wait time
-	mov	Temp8, XH
-throttle_low_cal:			
-	sbr	Flags3, (1<<FULL_THROTTLE_RANGE)	; Set range to 1000-2020us
-	cli		
-	xcall find_throttle_gain		; Set throttle gain
-	sei		
-	xcall wait100ms
-	cli						; Disable interrupts (freeze New_Rcp value)
-	cbr	Flags3, (1<<FULL_THROTTLE_RANGE)	; Set programmed range
-	xcall find_throttle_gain		; Set throttle gain
-	lds	Temp7, New_Rcp			; Store new RC pulse value
-	lds	XH, New_Rcp			; Load new RC pulse value
-	cpi	XH, (RCP_MAX/2)		; Below midstick?
-	sei						; Enable interrupts
-	brcc	throttle_low_cal_start	; No - start over
-
-	xcall wait1ms		
-	cli						; Disable all interrupts
-	xcall beep_f1
-	xcall wait10ms
-	xcall beep_f1
-	sei						; Enable all interrupts
-	dec	Temp8				
-	brne	throttle_low_cal		; Continue to wait
-
-	xcall average_throttle
-	mov	XH, Temp7			
-	subi	XH, 0xFB				; Add about 2% (subtract negative number)
-	sts	Pgm_Ppm_Min_Throttle, XH	; Store
-	xcall wait200ms				
-	cli					
-	xcall store_all_in_eeprom	
-	xcall success_beep_inverted
-	sei					
-
-program_by_tx_entry_wait_ppm:	
-	xcall wait100ms
-	cli					
-	xcall find_throttle_gain		; Set throttle gain
-	sei
-	lds	XH, New_Rcp			; Load new RC pulse value
-	cpi	XH, RCP_MAX			; At or above max?
-	brcc	PC+2
-	rjmp	arming_ppm_check		; No - go back
-
-	rjmp	program_by_tx			; Yes - enter programming mode
-
-program_by_tx_checked:
-	lds	Temp1, New_Rcp			; Load new RC pulse value
-	lds	XH, Gov_Arm_Target		; Is RC pulse larger than arm target?
-	cp	Temp1, XH
-	brcs	arm_target_updated		; No - do not update
-
-	sts	Gov_Arm_Target, Temp1	; Yes - update arm target
-
-arm_target_updated:
-	xcall wait100ms			; Wait for new throttle value
-	ldi	Temp1, RCP_STOP		; Default stop value
-	lds	XH, Pgm_Direction		; Check if bidirectional operation
-	subi	XH, 3
-	brne	PC+2					; No - branch
-
-	ldi	Temp1, (RCP_STOP+4)		; Higher stop value for bidirectional
-
-	lds	XH, New_Rcp			; Load new RC pulse value
-	cp	XH, Temp1				; Below stop?
-	brcs	arm_end_beep			; Yes - proceed
-
-	rjmp	arming_start			; No - start over
-
-arm_end_beep:
 	; Beep arm sequence end signal
 	cli						; Disable all interrupts
 	;; arming signal
@@ -6168,10 +6127,9 @@ jmp_wait_for_power_on:
 
 ;**** **** **** **** **** **** **** **** **** **** **** **** ****
 
-.INCLUDE "BLHeliTxPgm.inc"			; Include source code for programming the ESC with the TX
+.INCLUDE "BLHeliTxPgm.inc" Include source code for programming the ESC with the TX
 
 ;**** **** **** **** **** **** **** **** **** **** **** **** ****
-
 
 reset:
 rjmp	pgm_start
