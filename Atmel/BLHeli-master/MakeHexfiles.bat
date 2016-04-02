@@ -116,10 +116,11 @@ goto :end
 
 
 :compile
-SET BESC=%NAME%_MAIN
-call :compile2
-SET BESC=%NAME%_TAIL
-call:compile2
+REM Main and Tail not supported with Delta Ray
+REM SET BESC=%NAME%_MAIN
+REM call :compile2
+REM SET BESC=%NAME%_TAIL
+REM call:compile2
 SET BESC=%NAME%_MULTI
 call:compile2
 goto :eof
