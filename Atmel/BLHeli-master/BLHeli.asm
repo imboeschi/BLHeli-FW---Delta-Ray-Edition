@@ -32,7 +32,6 @@
 	;; 17.01.2016 - Modified by imboeschi (http://www.rcgroups.com/forums/member.php?u=618210)
 	;; to support 15kHz PWM (positive or negative) signal for Hobbyzone Delta Ray 
 	;; All other input signal types removed.
-	;; See comments in the code below in rcp_int_second_meas_pwm_freq:
 ;;
 ; The first lines of the software must be modified according to the chosen environment:
 ; Uncomment the selected ESC and main/tail/multi mode
@@ -2289,8 +2288,12 @@ rcp_int_fall:
 	ldi	I_Temp2, 0
 cont_1:	
 	cpi	I_Temp1, DR_RCP_MAX
-	brlo	PC+2
+	brlo	cont_2
 	ldi	I_Temp1, DR_RCP_MAX
+cont_2:	
+	cpi	I_Temp1, DR_RCP_MIN	; make sure throttle reading is not too low (I have never observed values this low but just in case)
+	brsh	throttle_rescale
+	ldi	I_Temp1, DR_RCP_MIN ; if too low, set to minimum acceptable value
 	
 throttle_rescale:	
 	;; Two changes here for the Delta Ray
@@ -2319,10 +2322,6 @@ dr_continue:
 	brsh	mid_throttle
 	;; rescale throttle below DR_RCP_CROSSOVER_L (= 60 which is 45% of full throttle) - see software documentation
 	;; transformation is multiply by 1.5 and subtract 30
-	cpi	I_Temp1, DR_RCP_MIN	; make sure throttle reading is not too low (I have never observed values this low but just in case)
-	brsh	rescale_throttle_cont
-	ldi	I_Temp1, DR_RCP_MIN ; if too low, set to minimum acceptable value
-rescale_throttle_cont:
 	mov	XL, I_Temp1	; Multiple by 1.5 and subtract 30.  Note this cannot overflow (max value is 60*1.5-30=60) or be below zero (min is 20*1.5-30=0)
 	lsr	I_Temp1
 	add	I_Temp1, XL
@@ -2331,13 +2330,13 @@ rescale_throttle_cont:
 mid_throttle:
 	cpi	I_Temp1, DR_RCP_CROSSOVER_H
 	brsh	high_throttle
-	;; mid range (beween DR_RCP_CROSSOVER_L and DR_RCP_CROSSOVER_H) the transformation is multiply by three and subtract 120
-	;; this can overflow but the subtraction of 120 brings it back into legal range (so no need for 16 bit addition)
+	;; mid range (beween DR_RCP_CROSSOVER_L and DR_RCP_CROSSOVER_H) the transformation is to subtract
+	;; 40 and multiply by 3
+	;; this cannot overflow since the maximum value is (109-40)*3 = 207
+	subi	I_Temp1, 40	
 	mov	XL, I_Temp1
-	ldi	I_Temp2, 0
 	lsl	I_Temp1
 	add	I_Temp1, XL
-	subi	I_Temp1, 120
 	
 	rjmp	rcp_int_check_legal_range
 high_throttle:	
@@ -5434,15 +5433,14 @@ clear_ram:
 	ldi	XH, 1
 	sts	Random, XH
 	; Set beep strength
-	lds	Temp1, Pgm_Beep_Strength
-	sts	Beep_Strength, Temp1
-				; Set default programmed parameters
 	xcall set_default_parameters
 
 				; Read all programmed parameters
 	xcall read_all_eeprom_parameters
 	; Initialize ADC
 	Initialize_Adc	XH		; Initialize ADC operation
+	lds	Temp1, Pgm_Beep_Strength
+	sts	Beep_Strength, Temp1
 	; Set initial arm variable
 	ldi	XH, 1
 	sts	Initial_Arm, XH
@@ -5453,8 +5451,6 @@ clear_ram:
 	;; Beep strength is not always uniformly set for some reason
 	;; hardwire it to 10 (faint) for now
 	;;
-	ldi	I_Temp1, 10
-	sts	Beep_Strength, I_Temp1
 	xcall wait200ms
 	xcall beep_f1
 	xcall wait30ms
@@ -5521,10 +5517,6 @@ init_no_signal:
 	;; 2. 100% throttle - boot loader
 	;; 3. mid-range throttle (1-99%) - throttle calibration
 	;;
-	;;  these next two lines are probably not necessary - review later
-	ldi	Temp1, 0
-	sts	Throttle_Calibrate, Temp1
-
 	xcall	measure_throttle
 
 	;; if very few high readings - normal start
@@ -5593,8 +5585,8 @@ decode:
 	; Find throttle gain from stored min and max settings
 	;; 	xcall find_throttle_gain
 	; Set beep strength
-	;; 	lds	Temp1, Pgm_Beep_Strength
-	;; 	sts	Beep_Strength, Temp1
+	lds	Temp1, Pgm_Beep_Strength
+	sts	Beep_Strength, Temp1
 	; Switch power off
 	xcall switch_power_off
 	; Timer0: clk/8 for regular interrupts
@@ -5626,8 +5618,11 @@ decode:
 	cbr	Flags0, (1<<RCP_MEAS_PWM_FREQ)
 	ldi	XL, (1<<RCP_PWM_FREQ_15KHZ)
 	mov	I_Temp4, XL
-	ldi	XL, 10					; Set period tolerance requirement (LSB) - calculated from PWM values used in standard BLHeli FW
-	mov	I_Temp3, XL
+	ldi	XL, ((1<<RCP_PWM_FREQ_1KHZ)+(1<<RCP_PWM_FREQ_2KHZ)+(1<<RCP_PWM_FREQ_4KHZ)+(1<<RCP_PWM_FREQ_8KHZ)+(1<<RCP_PWM_FREQ_15KHZ))
+	com	XL
+	and	XL, Flags3				; Clear all pwm frequency flags
+	or	XL, I_Temp4				; Store pwm frequency value in flags
+	cbr	Flags2, (1<<RCP_PPM)		; Default, flag is not set (PWM)	
 	Rcp_Int_First XH				; Enable interrupt and set to first edge
 	Rcp_Int_Enable XH	 			; Enable interrupt
 	Rcp_Clear_Int_Flag XH			; Clear interrupt flag

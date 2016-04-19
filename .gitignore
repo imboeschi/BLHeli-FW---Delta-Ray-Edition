@@ -2,3 +2,5 @@
 *.dat
 # emacs backup files
 *~
+.DS_Store
+
